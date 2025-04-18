@@ -2,3 +2,31 @@
 
 # CloudSSH
 CloudSSH is a package that provides ssh.Signer implementations for AWS KMS and Azure Keyvault
+
+# Example Usage
+```go
+kmsSigner, err := NewKmsSigner(kmsKeyId)
+if err != nil {
+	log.Fatal(err)
+}
+
+kvSigner, err := NewKvSigner(
+	vaultUrl,
+	keyName,
+	keyVersion,
+)
+if err != nil {
+	log.Fatal(err)
+}
+
+sshconfig := &ssh.ClientConfig{
+	User: "user",
+	Auth: []ssh.AuthMethod{
+		ssh.PublicKeys(kmsSigner, kvSigner),
+	},
+	HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+}
+```
+
+
+
