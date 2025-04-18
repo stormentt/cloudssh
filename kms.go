@@ -90,7 +90,6 @@ func (k *KmsSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
 		return nil, UnsupportedKeyType{k.PubKey.Type()}
 	}
 
-	// Using the Config value, create the DynamoDB client
 	svc := kms.NewFromConfig(cfg)
 	signature, err := svc.Sign(
 		context.Background(),
