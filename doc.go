@@ -1,5 +1,5 @@
 /*
-Package cloudssh provides an implementation of golang.org/x/crypto/ssh.Signer that uses AWS KMS or Azure KeyVault to perform cryptograph operations
+Package cloudssh provides an implementation of golang.org/x/crypto/ssh.Signer that uses AWS KMS or Azure KeyVault to perform cryptographic operations
 
 AWS Example:
 
