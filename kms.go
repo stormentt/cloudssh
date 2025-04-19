@@ -7,32 +7,27 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/stormentt/cloudssh/sshutil"
 	"golang.org/x/crypto/ssh"
 	"io"
 	"math/big"
+	"slices"
 )
 
 type KmsSigner struct {
-	KeyId  string
-	PubKey ssh.PublicKey
+	KeyId     string
+	PubKey    ssh.PublicKey
+	AwsConfig aws.Config
 }
 
-func NewKmsSigner(keyId string) (*KmsSigner, error) {
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
-	if err != nil {
-		return nil, err
-	}
+func NewKmsSigner(awsConfig aws.Config, keyId string) (*KmsSigner, error) {
+	kmsClient := kms.NewFromConfig(awsConfig)
 
-	svc := kms.NewFromConfig(cfg)
-
-	resp, err := svc.GetPublicKey(context.Background(), &kms.GetPublicKeyInput{
+	resp, err := kmsClient.GetPublicKey(context.Background(), &kms.GetPublicKeyInput{
 		KeyId: aws.String(keyId),
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -42,24 +37,35 @@ func NewKmsSigner(keyId string) (*KmsSigner, error) {
 		return nil, err
 	}
 
+	var sshPubKey ssh.PublicKey
+
 	switch decoded.(type) {
 	case *rsa.PublicKey:
-		return &KmsSigner{
-			KeyId:  keyId,
-			PubKey: sshutil.New512(decoded.(*rsa.PublicKey)),
-		}, nil
+		if slices.Contains(resp.SigningAlgorithms, types.SigningAlgorithmSpecRsassaPkcs1V15Sha512) {
+			sshPubKey = sshutil.New512(decoded.(*rsa.PublicKey))
+		} else if slices.Contains(resp.SigningAlgorithms, types.SigningAlgorithmSpecRsassaPkcs1V15Sha256) {
+			sshPubKey = sshutil.New256(decoded.(*rsa.PublicKey))
+		} else {
+			return nil, KmsKeyLacksSupportedAlgorithms{
+				KeyId:                     *resp.KeyId,
+				KeySigningAlgorithms:      resp.SigningAlgorithms,
+				RequiredSigningAlgorithms: []types.SigningAlgorithmSpec{types.SigningAlgorithmSpecRsassaPkcs1V15Sha512, types.SigningAlgorithmSpecRsassaPkcs1V15Sha256},
+			}
+		}
 	case *ecdsa.PublicKey:
-		sshPubKey, err := ssh.NewPublicKey(decoded)
+		sshPubKey, err = ssh.NewPublicKey(decoded)
 		if err != nil {
 			return nil, err
 		}
-		return &KmsSigner{
-			KeyId:  keyId,
-			PubKey: sshPubKey,
-		}, nil
 	default:
 		return nil, UnsupportedKeyType{string(resp.KeySpec)}
 	}
+
+	return &KmsSigner{
+		KeyId:     keyId,
+		PubKey:    sshPubKey,
+		AwsConfig: awsConfig,
+	}, nil
 }
 
 func (k *KmsSigner) PublicKey() ssh.PublicKey {
@@ -67,11 +73,6 @@ func (k *KmsSigner) PublicKey() ssh.PublicKey {
 }
 
 func (k *KmsSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
-	if err != nil {
-		return nil, err
-	}
-
 	var signingAlgorithm types.SigningAlgorithmSpec
 
 	switch k.PubKey.Type() {
@@ -90,8 +91,8 @@ func (k *KmsSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
 		return nil, UnsupportedKeyType{k.PubKey.Type()}
 	}
 
-	svc := kms.NewFromConfig(cfg)
-	signature, err := svc.Sign(
+	kmsClient := kms.NewFromConfig(k.AwsConfig)
+	signature, err := kmsClient.Sign(
 		context.Background(),
 		&kms.SignInput{
 			KeyId:            &k.KeyId,
@@ -102,7 +103,6 @@ func (k *KmsSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
 			MessageType:      types.MessageTypeRaw,
 		},
 	)
-
 	if err != nil {
 		return nil, err
 	}
