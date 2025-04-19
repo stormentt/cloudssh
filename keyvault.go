@@ -37,9 +37,11 @@ func NewKvSigner(azureCredential azcore.TokenCredential, vaultUrl, keyName, keyV
 		return nil, err
 	}
 
+	var sshPubKey ssh.PublicKey
+	var sigAlgo azkeys.SignatureAlgorithm
+
 	if *kvGetKeyResp.Key.Kty == azkeys.KeyTypeEC || *kvGetKeyResp.Key.Kty == azkeys.KeyTypeECHSM {
 		var curve elliptic.Curve
-		var sigAlgo azkeys.SignatureAlgorithm
 
 		switch *kvGetKeyResp.Key.Crv {
 		case azkeys.CurveNameP256:
@@ -67,18 +69,10 @@ func NewKvSigner(azureCredential azcore.TokenCredential, vaultUrl, keyName, keyV
 			Y:     y,
 		}
 
-		sshPubKey, err := ssh.NewPublicKey(&ecPubKey)
+		sshPubKey, err = ssh.NewPublicKey(&ecPubKey)
 		if err != nil {
 			return nil, err
 		}
-
-		return &KvSigner{
-			VaultUrl:   vaultUrl,
-			KeyName:    keyName,
-			KeyVersion: keyVersion,
-			PubKey:     sshPubKey,
-			SigAlgo:    sigAlgo,
-		}, nil
 
 	} else if *kvGetKeyResp.Key.Kty == azkeys.KeyTypeRSA || *kvGetKeyResp.Key.Kty == azkeys.KeyTypeRSAHSM {
 		n := big.NewInt(0)
@@ -95,20 +89,20 @@ func NewKvSigner(azureCredential azcore.TokenCredential, vaultUrl, keyName, keyV
 		}
 
 		// In azure we just assume it'll support rsa-sha2-512
-		sshPubKey := sshutil.New512(&rsaPubKey)
-		return &KvSigner{
-			VaultUrl:        vaultUrl,
-			KeyName:         keyName,
-			KeyVersion:      keyVersion,
-			PubKey:          sshPubKey,
-			SigAlgo:         azkeys.SignatureAlgorithmRS512,
-			AzureCredential: azureCredential,
-		}, nil
-
+		sshPubKey = sshutil.New512(&rsaPubKey)
+		sigAlgo = azkeys.SignatureAlgorithmRS512
 	} else {
 		return nil, UnsupportedKeyType{KeyType: string(*kvGetKeyResp.Key.Kty)}
 	}
 
+	return &KvSigner{
+		VaultUrl:        vaultUrl,
+		KeyName:         keyName,
+		KeyVersion:      keyVersion,
+		PubKey:          sshPubKey,
+		SigAlgo:         sigAlgo,
+		AzureCredential: azureCredential,
+	}, nil
 }
 
 // PublicKey returns the associated ssh.PublicKey
