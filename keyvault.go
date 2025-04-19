@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"fmt"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
 	"github.com/stormentt/cloudssh/sshutil"
 	"golang.org/x/crypto/ssh"
@@ -18,21 +18,16 @@ import (
 )
 
 type KvSigner struct {
-	VaultUrl   string
-	KeyName    string
-	KeyVersion string
-	PubKey     ssh.PublicKey
-	SigAlgo    azkeys.SignatureAlgorithm
+	VaultUrl        string
+	KeyName         string
+	KeyVersion      string
+	PubKey          ssh.PublicKey
+	SigAlgo         azkeys.SignatureAlgorithm
+	AzureCredential azcore.TokenCredential
 }
 
-func NewKvSigner(vaultUrl, keyName, keyVersion string) (*KvSigner, error) {
-
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return nil, err
-	}
-
-	client, err := azkeys.NewClient(vaultUrl, cred, nil)
+func NewKvSigner(azureCredential azcore.TokenCredential, vaultUrl, keyName, keyVersion string) (*KvSigner, error) {
+	client, err := azkeys.NewClient(vaultUrl, azureCredential, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -99,13 +94,15 @@ func NewKvSigner(vaultUrl, keyName, keyVersion string) (*KvSigner, error) {
 			E: eInt,
 		}
 
+		// In azure we just assume it'll support rsa-sha2-512
 		sshPubKey := sshutil.New512(&rsaPubKey)
 		return &KvSigner{
-			VaultUrl:   vaultUrl,
-			KeyName:    keyName,
-			KeyVersion: keyVersion,
-			PubKey:     sshPubKey,
-			SigAlgo:    azkeys.SignatureAlgorithmRS512,
+			VaultUrl:        vaultUrl,
+			KeyName:         keyName,
+			KeyVersion:      keyVersion,
+			PubKey:          sshPubKey,
+			SigAlgo:         azkeys.SignatureAlgorithmRS512,
+			AzureCredential: azureCredential,
 		}, nil
 
 	} else {
@@ -114,22 +111,21 @@ func NewKvSigner(vaultUrl, keyName, keyVersion string) (*KvSigner, error) {
 
 }
 
+// PublicKey returns the associated ssh.PublicKey
 func (k *KvSigner) PublicKey() ssh.PublicKey {
 	return k.PubKey
 }
 
+// Sign returns a signature for the given data.
+// This method will hash the message prior to sending it to Key Vault, using the correct digest method for the signing algorithm supported by the key.
 func (k *KvSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return nil, err
-	}
-
-	client, err := azkeys.NewClient(k.VaultUrl, cred, nil)
+	client, err := azkeys.NewClient(k.VaultUrl, k.AzureCredential, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	var hasher hash.Hash
+
 	switch k.SigAlgo {
 	case azkeys.SignatureAlgorithmES256:
 		hasher = sha256.New()
@@ -147,22 +143,27 @@ func (k *KvSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
 
 	hasher.Write(data)
 	hashedData := hasher.Sum(nil)
+
 	kvSignResp, err := client.Sign(context.Background(), k.KeyName, k.KeyVersion, azkeys.SignParameters{
 		Algorithm: &k.SigAlgo,
 		Value:     hashedData,
 	}, nil)
-
 	if err != nil {
 		return nil, err
 	}
 
-	if k.SigAlgo == azkeys.SignatureAlgorithmES256 || k.SigAlgo == azkeys.SignatureAlgorithmES384 || k.SigAlgo == azkeys.SignatureAlgorithmES512 {
-		resLen := len(kvSignResp.Result)
+	var sigBlob []byte
+
+	switch k.SigAlgo {
+	case azkeys.SignatureAlgorithmES256, azkeys.SignatureAlgorithmES384, azkeys.SignatureAlgorithmES512:
+		// Reference RFC 5656 section 3.1.2 for how SSH expects ECDSA signatures to be represented.
+		// Azure encodes elliptic curve signatures in some weird format. It just slaps the two ints together, each one taking up half the bytes of the response.
+		halfLen := len(kvSignResp.Result) / 2
 		R := big.NewInt(0)
 		S := big.NewInt(0)
 
-		R.SetBytes(kvSignResp.Result[:resLen/2])
-		S.SetBytes(kvSignResp.Result[resLen/2:])
+		R.SetBytes(kvSignResp.Result[:halfLen])
+		S.SetBytes(kvSignResp.Result[halfLen:])
 
 		ecdsaSig := struct {
 			R *big.Int
@@ -172,15 +173,17 @@ func (k *KvSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
 			S: S,
 		}
 
-		return &ssh.Signature{
-			Format: k.PubKey.Type(),
-			Blob:   ssh.Marshal(ecdsaSig),
-		}, nil
-	} else {
-		return &ssh.Signature{
-			Format: k.PubKey.Type(),
-			Blob:   kvSignResp.Result,
-		}, nil
+		sigBlob = ssh.Marshal(ecdsaSig)
+	case azkeys.SignatureAlgorithmRS256, azkeys.SignatureAlgorithmRS512:
+		// RSA signatures are easy :)
+		sigBlob = kvSignResp.Result
+	default:
+		// this should never happen
+		return nil, fmt.Errorf("unsupported signature algo: %s", k.SigAlgo)
 	}
 
+	return &ssh.Signature{
+		Format: k.PubKey.Type(),
+		Blob:   sigBlob,
+	}, nil
 }
