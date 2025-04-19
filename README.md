@@ -5,51 +5,33 @@ CloudSSH is a package that provides an [ssh.Signer](https://pkg.go.dev/golang.or
 
 # Example Usage
 ```go
-kmsSigner, err := NewKmsSigner(kmsKeyId)
-if err != nil {
-	log.Fatal(err)
-}
+awsConfig, err := config.LoadDefaultConfig(context.Background(), config.WithRegion("us-east-1"))
+if err != nil { panic(err) }
 
-kvSigner, err := NewKvSigner(
-	vaultUrl,
-	keyName,
-	keyVersion,
-)
-if err != nil {
-	log.Fatal(err)
-}
+kmsSigner, err := cloudssh.NewKmsSigner(awsConfig, "kms-key-id")
+if err != nil { panic(err) }
+
+azureCreds, err := azidentity.NewDefaultAzureCredential(nil)
+if err != nil { panic(err) }
+
+kvSigner, err := cloudssh.NewKvSigner(azureCreds, "https://your-vault-name.vault.azure.net", "your-key-name", "key-version")
+if err != nil { panic(err) }
 
 sshconfig := &ssh.ClientConfig{
-	User: "user",
-	Auth: []ssh.AuthMethod{
-		ssh.PublicKeys(kmsSigner, kvSigner),
-	},
-	HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+    User: "user",
+    Auth: []ssh.AuthMethod{
+        ssh.PublicKeys(kmsSigner, kvSigner),
+    },
+    HostKeyCallback: ssh.InsecureIgnoreHostKey(), // please don't actually use InsecureIgnoreHostKey
 }
 
-client, err := ssh.Dial("tcp", "yourserver.com:22", config)
-if err != nil {
-	log.Fatal("Failed to dial: ", err)
-}
-defer client.Close()
+client, err := ssh.Dial("tcp", "example.com:22", sshconfig)
+if err != nil { panic(err) }
 
-// Each ClientConn can support multiple interactive sessions,
-// represented by a Session.
 session, err := client.NewSession()
-if err != nil {
-	log.Fatal("Failed to create session: ", err)
-}
-defer session.Close()
+if err != nil { panic(err) }
 
-// Once a Session is created, you can execute a single command on
-// the remote side using the Run method.
-var b bytes.Buffer
-session.Stdout = &b
-if err := session.Run("/usr/bin/whoami"); err != nil {
-	log.Fatal("Failed to run: " + err.Error())
-}
-fmt.Println(b.String())
+output, err := session.CombinedOutput("/usr/bin/whoami")
+if err != nil { panic(err) }
+fmt.Println(string(output))
 ```
-
-
-
